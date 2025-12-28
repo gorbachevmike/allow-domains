@@ -1,54 +1,142 @@
-# .github/workflows/build-release.yml
-name: Build and Push SRS to release branch
+name: Build domain.srs and cidr.srs
 
 on:
   push:
     branches:
       - main
     paths:
-      - 'domain.json'  # Запускать только при изменении domain.json
+      - 'domain.json'
 
 jobs:
-  build-and-deploy:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
         with:
           ref: main
+
+      # === Установка зависимостей ===
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dnsutils jq curl
+
+      # === Кэширование sing-box ===
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-      
+
       - name: Cache sing-box binary
         id: cache-sing-box
         uses: actions/cache@v4
         with:
           path: ~/.local/bin/sing-box
-          key: sing-box-v1-${{ hashFiles('**/go.sum') }}  # или фиксированный ключ, если версия не меняется
+          key: sing-box-v1-1.22
           restore-keys: |
             sing-box-v1-
-      
+
       - name: Install sing-box if not cached
         if: steps.cache-sing-box.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/.local/bin
           go install -v github.com/sagernet/sing-box/cmd/sing-box@latest
           cp "$(go env GOPATH)/bin/sing-box" ~/.local/bin/sing-box
-      
+
       - name: Add sing-box to PATH
         run: echo "~/.local/bin" >> $GITHUB_PATH
 
+      # === Генерация domain.srs ===
       - name: Compile domain.srs
         run: |
           sing-box rule-set compile --output /tmp/domain.srs domain.json
-      
-      - name: Push domain.srs to release branch
+
+      # === Генерация cidr.json и cidr.srs ===
+      - name: Generate cidr.json from domain.json
+        run: |
+          set -e
+          CIDR_FILE="/tmp/cidr_list.txt"
+          > "$CIDR_FILE"
+
+          echo "Extracting domains from domain.json..."
+          DOMAINS=$(jq -r '.rules[].domain_suffix[] // empty' domain.json | sort -u)
+
+          if [ -z "$DOMAINS" ]; then
+            echo "No domains found in domain.json under .rules[].domain_suffix"
+            echo "[]" > /tmp/empty_cidrs.txt
+            DOMAINS=""
+          fi
+
+          echo "Domains to resolve:"
+          echo "$DOMAINS"
+
+          while IFS= read -r domain; do
+            [ -z "$domain" ] && continue
+            echo "→ Resolving $domain..."
+
+            # Получаем IPv4 адреса
+            IPS=$(dig +short A "$domain" | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$')
+            if [ -z "$IPS" ]; then
+              echo "  ⚠️ No A records for $domain"
+              continue
+            fi
+
+            for ip in $IPS; do
+              echo "  → Querying CIDR for $ip..."
+              # Запрос к ipinfo.io (без токена — лимит ~1/сек)
+              RESP=$(curl -s "https://ipinfo.io/$ip/json")
+              CIDR=$(echo "$RESP" | jq -r '.asn.route // empty')
+
+              if [ -n "$CIDR" ]; then
+                echo "    ✓ CIDR: $CIDR"
+                echo "$CIDR" >> "$CIDR_FILE"
+              else
+                echo "    ⚠️ CIDR not found for $ip"
+              fi
+
+              # Уважаем rate limit
+              sleep 1
+            done
+          done <<< "$DOMAINS"
+
+          # Уникальные CIDR
+          if [ -s "$CIDR_FILE" ]; then
+            UNIQUE_CIDRS=$(sort -u "$CIDR_FILE")
+          else
+            UNIQUE_CIDRS=""
+          fi
+
+          COUNT=$(echo "$UNIQUE_CIDRS" | grep -v '^$' | wc -l)
+          echo "Total unique CIDRs: $COUNT"
+
+          # Формируем cidr.json
+          if [ -n "$UNIQUE_CIDRS" ]; then
+            CIDR_ARRAY=$(echo "$UNIQUE_CIDRS" | grep -v '^$' | jq -R . | jq -s .)
+          else
+            CIDR_ARRAY="[]"
+          fi
+
+          jq -n --argjson cidrs "$CIDR_ARRAY" '{
+            version: 3,
+            rules: [
+              { ip_cidr: $cidrs }
+            ]
+          }' > /tmp/cidr.json
+
+          echo "Generated cidr.json:"
+          cat /tmp/cidr.json
+
+      - name: Compile cidr.srs
+        run: |
+          sing-box rule-set compile --output /tmp/cidr.srs /tmp/cidr.json
+
+      # === Публикация в ветку release ===
+      - name: Push to release branch
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-      
+
           if git ls-remote --exit-code --heads origin release; then
             git fetch origin release --depth=1
             git checkout release
@@ -56,8 +144,9 @@ jobs:
           else
             git checkout --orphan release
           fi
-      
-          cp /tmp/domain.srs ./domain.srs
-          git add domain.srs
-          git commit -m "Update domain.srs from main@$(git rev-parse --short HEAD)"
+
+          cp /tmp/domain.srs .
+          cp /tmp/cidr.srs .
+          git add domain.srs cidr.srs
+          git commit -m "Update domain.srs and cidr.srs from main@$(git rev-parse --short HEAD)"
           git push origin release --force
