@@ -16,15 +16,29 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
-
-      - name: Set up Go (required by sing-box)
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-
-      - name: Install sing-box
+      
+      - name: Cache sing-box binary
+        id: cache-sing-box
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin/sing-box
+          key: sing-box-v1-${{ hashFiles('**/go.sum') }}  # или фиксированный ключ, если версия не меняется
+          restore-keys: |
+            sing-box-v1-
+      
+      - name: Install sing-box if not cached
+        if: steps.cache-sing-box.outputs.cache-hit != 'true'
         run: |
+          mkdir -p ~/.local/bin
           go install -v github.com/sagernet/sing-box/cmd/sing-box@latest
+          cp "$(go env GOPATH)/bin/sing-box" ~/.local/bin/sing-box
+      
+      - name: Add sing-box to PATH
+        run: echo "~/.local/bin" >> $GITHUB_PATH
 
       - name: Compile domain.srs
         run: |
