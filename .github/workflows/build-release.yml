@@ -42,22 +42,22 @@ jobs:
 
       - name: Compile domain.srs
         run: |
-          sing-box rule-set compile --output domain.srs domain.json
-
-      - name: Configure Git
+          sing-box rule-set compile --output /tmp/domain.srs domain.json
+      
+      - name: Push domain.srs to release branch
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-
-      - name: Checkout release branch (or create if not exists)
-        run: |
-          git fetch origin release || git checkout --orphan release
-
-      - name: Replace domain.srs in release branch
-        run: |
-          git checkout release
-          git rm -rf .
-          cp domain.srs .
+      
+          if git ls-remote --exit-code --heads origin release; then
+            git fetch origin release --depth=1
+            git checkout release
+            git rm -rf .
+          else
+            git checkout --orphan release
+          fi
+      
+          cp /tmp/domain.srs ./domain.srs
           git add domain.srs
           git commit -m "Update domain.srs from main@$(git rev-parse --short HEAD)"
           git push origin release --force
