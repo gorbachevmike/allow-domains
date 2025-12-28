@@ -1,0 +1,49 @@
+# .github/workflows/build-release.yml
+name: Build and Push SRS to release branch
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'domain.json'  # Запускать только при изменении domain.json
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Go (required by sing-box)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install sing-box
+        run: |
+          go install -v github.com/sagernet/sing-box/cmd/sing-box@latest
+
+      - name: Compile domain.srs
+        run: |
+          sing-box rule-set compile --output domain.srs domain.json
+
+      - name: Configure Git
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Checkout release branch (or create if not exists)
+        run: |
+          git fetch origin release || git checkout --orphan release
+
+      - name: Replace domain.srs in release branch
+        run: |
+          git checkout release
+          git rm -rf .
+          cp domain.srs .
+          git add domain.srs
+          git commit -m "Update domain.srs from main@$(git rev-parse --short HEAD)"
+          git push origin release --force
