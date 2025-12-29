@@ -6,7 +6,8 @@
         "sketchup.com",
         "trimble.com",
         "telegram.org",
-        "vite.dev"
+        "vite.dev", 
+        "electron.build"
       ]
     }
   ]
